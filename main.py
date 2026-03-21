@@ -6,11 +6,17 @@ import audioop
 import struct
 import websockets
 import httpx
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.websockets import WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
+from pydantic import BaseModel
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +26,11 @@ PORT = int(os.getenv('PORT', 5050))
 GEMINI_MODEL = "gemini-2.0-flash-live-001"
 GEMINI_WS_URL = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={GEMINI_API_KEY}"
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
+
+# Email config
+SMTP_EMAIL = os.getenv('SMTP_EMAIL', '')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+MICHELLE_EMAIL = "mwmlwalraven@gmail.com"
 
 SYSTEM_MESSAGE = """You are an AI receptionist. When a call comes in, your first question is always:
 Hi! Thanks for calling. What industry or type of business are you calling about today?
@@ -56,130 +67,185 @@ Emergency: An electrician will call within 15 minutes. Routine: Scheduled within
 HOME CLEANING: You are Sandra from Spotless Home Cleaning. Ask name, address, home size, clean type.
 All requests: Quote and confirmation call within 2 hours.
 
-RULES: Keep responses SHORT 1-2 sentences. Sound natural and warm. Never make up times.
-Always confirm info before hanging up. End with: You are all set! Someone will be in touch soon.
+RULES:
+Keep responses SHORT 1-2 sentences.
+Sound natural and warm.
+Never make up times.
+Always confirm info before hanging up.
+End with: You are all set! Someone will be in touch soon.
 If industry not listed: I can help with that! Let me take your information.
 """
 
-
 # Keep-alive self-ping to prevent Render free tier from sleeping
 async def keep_alive():
-        url = RENDER_EXTERNAL_URL or f"http://localhost:{PORT}"
-        while True:
-                    await asyncio.sleep(300)  # Ping every 5 minutes
+    url = RENDER_EXTERNAL_URL or f"http://localhost:{PORT}"
+    while True:
+        await asyncio.sleep(300)  # Ping every 5 minutes
         try:
-                        async with httpx.AsyncClient() as client:
-                                            resp = await client.get(f"{url}/health", timeout=10)
-                                            print(f"Keep-alive ping: {resp.status_code}")
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{url}/health", timeout=10)
+                print(f"Keep-alive ping: {resp.status_code}")
         except Exception as e:
-                        print(f"Keep-alive ping failed: {e}")
-
+            print(f"Keep-alive ping failed: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-        task = asyncio.create_task(keep_alive())
-        yield
-        task.cancel()
-
+    task = asyncio.create_task(keep_alive())
+    yield
+    task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
-if not GEMINI_API_KEY:
-        raise ValueError('Missing GEMINI_API_KEY')
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+if not GEMINI_API_KEY:
+    raise ValueError('Missing GEMINI_API_KEY')
 
 def mulaw_to_pcm16(mulaw_data):
-        pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
-        pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
-        return pcm_16k
-
+    pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
+    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+    return pcm_16k
 
 def pcm16_to_mulaw(pcm_data, from_rate=24000):
-        pcm_8k, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, 8000, None)
-        mulaw_data = audioop.lin2ulaw(pcm_8k, 2)
-        return mulaw_data
-
+    pcm_8k, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, 8000, None)
+    mulaw_data = audioop.lin2ulaw(pcm_8k, 2)
+    return mulaw_data
 
 @app.get("/", response_class=JSONResponse)
 async def index_page():
-        return {"message": "Multi-Industry AI Voice Agent (Gemini) is running!"}
-
+    return {"message": "Multi-Industry AI Voice Agent (Gemini) is running!"}
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
-        return {"status": "ok"}
+    return {"status": "ok"}
 
+# --- Send Email Endpoint for ElevenLabs Agent ---
+class EmailRequest(BaseModel):
+    caller_name: str = ""
+    callback_number: str = ""
+    preferred_dates: str = ""
+    new_or_returning: Optional[str] = ""
+    reason_for_therapy: Optional[str] = ""
+    referral_source: Optional[str] = ""
+    insurance_provider: Optional[str] = ""
+
+@app.post("/send-email", response_class=JSONResponse)
+async def send_email(data: EmailRequest):
+    try:
+        subject = f"New Virtual Appointment Request - {data.caller_name}"
+        body = f"""New Virtual Appointment Request
+
+Name: {data.caller_name}
+Callback Number: {data.callback_number}
+Preferred Dates/Times: {data.preferred_dates}
+New or Returning: {data.new_or_returning}
+Reason for Seeking Therapy: {data.reason_for_therapy}
+Referral Source: {data.referral_source}
+Insurance Provider: {data.insurance_provider}
+
+---
+Message sent by Aria - Tree of Healing Appointment Scheduler
+"""
+        if SMTP_EMAIL and SMTP_PASSWORD:
+            msg = MIMEMultipart()
+            msg['From'] = SMTP_EMAIL
+            msg['To'] = MICHELLE_EMAIL
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body, 'plain'))
+
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                server.send_message(msg)
+
+            print(f"Email sent to {MICHELLE_EMAIL} for {data.caller_name}")
+            return {"status": "success", "message": f"Email sent to Michelle for {data.caller_name}"}
+        else:
+            print(f"SMTP not configured. Would have sent email for: {data.caller_name}")
+            print(f"Details: {body}")
+            return {"status": "success", "message": "Email logged (SMTP not configured)", "details": body}
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
-        response = VoiceResponse()
-        response.say("Please wait while we connect you to our AI receptionist.", voice="Google.en-US-Chirp3-HD-Aoede")
-        response.pause(length=1)
-        response.say("OK you can start talking!", voice="Google.en-US-Chirp3-HD-Aoede")
-        host = request.url.hostname
-        connect = Connect()
-        connect.stream(url=f'wss://{host}/media-stream')
-        response.append(connect)
-        return HTMLResponse(content=str(response), media_type="application/xml")
-
+    response = VoiceResponse()
+    response.say("Please wait while we connect you to our AI receptionist.", voice="Google.en-US-Chirp3-HD-Aoede")
+    response.pause(length=1)
+    response.say("OK you can start talking!", voice="Google.en-US-Chirp3-HD-Aoede")
+    host = request.url.hostname
+    connect = Connect()
+    connect.stream(url=f'wss://{host}/media-stream')
+    response.append(connect)
+    return HTMLResponse(content=str(response), media_type="application/xml")
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
-        print("Client connected")
-        await websocket.accept()
-        gemini_ws = await websockets.connect(GEMINI_WS_URL)
-        setup_msg = {"setup": {"model": f"models/{GEMINI_MODEL}", "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}}}, "systemInstruction": {"parts": [{"text": SYSTEM_MESSAGE}]}}}
-        await gemini_ws.send(json.dumps(setup_msg))
-        setup_response = await gemini_ws.recv()
-        print("Gemini setup:", json.loads(setup_response))
-        initial_msg = {"clientContent": {"turns": [{"role": "user", "parts": [{"text": "A caller just connected. Greet them and ask what industry they are calling about."}]}], "turnComplete": True}}
-        await gemini_ws.send(json.dumps(initial_msg))
-        stream_sid = None
+    print("Client connected")
+    await websocket.accept()
+
+    gemini_ws = await websockets.connect(GEMINI_WS_URL)
+
+    setup_msg = {"setup": {"model": f"models/{GEMINI_MODEL}", "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}}}, "systemInstruction": {"parts": [{"text": SYSTEM_MESSAGE}]}}}
+    await gemini_ws.send(json.dumps(setup_msg))
+    setup_response = await gemini_ws.recv()
+    print("Gemini setup:", json.loads(setup_response))
+
+    initial_msg = {"clientContent": {"turns": [{"role": "user", "parts": [{"text": "A caller just connected. Greet them and ask what industry they are calling about."}]}], "turnComplete": True}}
+    await gemini_ws.send(json.dumps(initial_msg))
+
+    stream_sid = None
 
     async def receive_from_twilio():
-                nonlocal stream_sid
-                try:
-                                async for message in websocket.iter_text():
-                                                    data = json.loads(message)
-                                                    if data['event'] == 'media':
-                                                                            mulaw_bytes = base64.b64decode(data['media']['payload'])
-                                                                            pcm_data = mulaw_to_pcm16(mulaw_bytes)
-                                                                            pcm_b64 = base64.b64encode(pcm_data).decode('utf-8')
-                                                                            audio_msg = {"realtimeInput": {"mediaChunks": [{"mimeType": "audio/pcm;rate=16000", "data": pcm_b64}]}}
-                                                                            if gemini_ws.open:
-                                                                                                        await gemini_ws.send(json.dumps(audio_msg))
-                                                        elif data['event'] == 'start':
-                                                        stream_sid = data['start']['streamSid']
-                                                        print(f"Stream started {stream_sid}")
-                except WebSocketDisconnect:
-                                print("Client disconnected.")
-                                if gemini_ws.open:
-                                                    await gemini_ws.close()
+        nonlocal stream_sid
+        try:
+            async for message in websocket.iter_text():
+                data = json.loads(message)
+                if data['event'] == 'media':
+                    mulaw_bytes = base64.b64decode(data['media']['payload'])
+                    pcm_data = mulaw_to_pcm16(mulaw_bytes)
+                    pcm_b64 = base64.b64encode(pcm_data).decode('utf-8')
+                    audio_msg = {"realtimeInput": {"mediaChunks": [{"mimeType": "audio/pcm;rate=16000", "data": pcm_b64}]}}
+                    if gemini_ws.open:
+                        await gemini_ws.send(json.dumps(audio_msg))
+                elif data['event'] == 'start':
+                    stream_sid = data['start']['streamSid']
+                    print(f"Stream started {stream_sid}")
+        except WebSocketDisconnect:
+            print("Client disconnected.")
+            if gemini_ws.open:
+                await gemini_ws.close()
 
-                        async def send_to_twilio():
-                                    nonlocal stream_sid
-                                    try:
-                                                    async for gemini_message in gemini_ws:
-                                                                        response = json.loads(gemini_message)
-                                                                        sc = response.get("serverContent", {})
-                                                                        mt = sc.get("modelTurn", {})
-                                                                        for part in mt.get("parts", []):
-                                                                                                ind = part.get("inlineData", {})
-                                                                                                if ind.get("mimeType", "").startswith("audio/pcm"):
-                                                                                                                            pcm_b64 = ind.get("data", "")
-                                                                                                                            if pcm_b64 and stream_sid:
-                                                                                                                                                            pcm_bytes = base64.b64decode(pcm_b64)
-                                                                                                                                                            mulaw_bytes = pcm16_to_mulaw(pcm_bytes, from_rate=24000)
-                                                                                                                                                            mulaw_b64 = base64.b64encode(mulaw_bytes).decode('utf-8')
-                                                                                                                                                            await websocket.send_json({"event": "media", "streamSid": stream_sid, "media": {"payload": mulaw_b64}})
-                                                                                                                                                if sc.get("turnComplete"):
-                                                                                                                                                                        print("Gemini turn complete")
-                                                                                                    except Exception as e:
-                                                                                                                    print(f"Error in send_to_twilio: {e}")
-                                                                                                        
-                                await asyncio.gather(receive_from_twilio(), send_to_twilio())
+    async def send_to_twilio():
+        nonlocal stream_sid
+        try:
+            async for gemini_message in gemini_ws:
+                response = json.loads(gemini_message)
+                sc = response.get("serverContent", {})
+                mt = sc.get("modelTurn", {})
+                for part in mt.get("parts", []):
+                    ind = part.get("inlineData", {})
+                    if ind.get("mimeType", "").startswith("audio/pcm"):
+                        pcm_b64 = ind.get("data", "")
+                        if pcm_b64 and stream_sid:
+                            pcm_bytes = base64.b64decode(pcm_b64)
+                            mulaw_bytes = pcm16_to_mulaw(pcm_bytes, from_rate=24000)
+                            mulaw_b64 = base64.b64encode(mulaw_bytes).decode('utf-8')
+                            await websocket.send_json({"event": "media", "streamSid": stream_sid, "media": {"payload": mulaw_b64}})
+                if sc.get("turnComplete"):
+                    print("Gemini turn complete")
+        except Exception as e:
+            print(f"Error in send_to_twilio: {e}")
 
+    await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
 if __name__ == "__main__":
-        import uvicorn
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
