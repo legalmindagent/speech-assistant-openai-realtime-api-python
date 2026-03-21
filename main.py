@@ -175,7 +175,7 @@ Message sent by Aria - Tree of Healing Appointment Scheduler
         return {"status": "error", "message": str(e)}
 
 
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw5QYplAPrEXKdinjgrl9C0y3yp-f7LiYETUYBUuBC0zep59Ibcy4lpFUFNMrMXZicDmQ/exec"
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyt24grvJxsfoCMeHgjSZ88E764Bzh5PE8vc1Ec34AP0v3vUSi3XTP3jJZlNCaekJogVg/exec"
 
 @app.post("/log-client", response_class=JSONResponse)
 async def log_client(request: Request):
