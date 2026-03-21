@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 websockets
-python-dotenv
 twilio
+python-dotenv
 audioop-lts
+httpx
