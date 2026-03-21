@@ -174,6 +174,20 @@ Message sent by Aria - Tree of Healing Appointment Scheduler
         print(f"Error sending email: {e}")
         return {"status": "error", "message": str(e)}
 
+
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw5QYplAPrEXKdinjgrl9C0y3yp-f7LiYETUYBUuBC0zep59Ibcy4lpFUFNMrMXZicDmQ/exec"
+
+@app.post("/log-client", response_class=JSONResponse)
+async def log_client(request: Request):
+        try:
+                    body = await request.json()
+                    async with httpx.AsyncClient(follow_redirects=True) as client:
+                                    resp = await client.post(GOOGLE_SCRIPT_URL, json=body, timeout=30)
+                                    return {"status": "success", "google_response": resp.text}
+        except Exception as e:
+                    print(f"Error logging client: {e}")
+                    return {"status": "error", "message": str(e)}
+            
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
     response = VoiceResponse()
