@@ -5,3 +5,5 @@ twilio
 python-dotenv
 audioop-lts
 httpx
+resend
+pydantic
