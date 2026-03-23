@@ -260,6 +260,102 @@ async def handle_media_stream(websocket: WebSocket):
 
     await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
+# --- Calendly Appointment Booking Endpoint for ElevenLabs Agent ---
+CALENDLY_API_KEY = os.getenv('CALENDLY_API_KEY', '')
+CALENDLY_EVENT_TYPE_UUID = os.getenv('CALENDLY_EVENT_TYPE_UUID', '')
+
+class BookingRequest(BaseModel):
+        name: str = ""
+        email: str = ""
+        business_name: Optional[str] = ""
+        preferred_date: Optional[str] = ""
+        preferred_time: Optional[str] = ""
+
+@app.post("/book-appointment", response_class=JSONResponse)
+async def book_appointment(data: BookingRequest):
+        try:
+                    # Create a Calendly scheduling link for the caller
+                    # This generates a one-off scheduling link they receive via email
+                    headers = {
+                                    "Authorization": f"Bearer {CALENDLY_API_KEY}",
+                                    "Content-Type": "application/json"
+                    }
+                    event_type_uri = f"https://api.calendly.com/event_types/{CALENDLY_EVENT_TYPE_UUID}"
+                    payload = {
+                                    "max_event_count": 1,
+                                    "owner": event_type_uri,
+                                    "owner_type": "EventType"
+                    }
+                    async with httpx.AsyncClient() as client:
+                                    resp = await client.post(
+                                                        "https://api.calendly.com/scheduling_links",
+                                                        json=payload,
+                                                        headers=headers,
+                                                        timeout=15
+                                    )
+                                result = resp.json()
+                    booking_url = result.get("resource", {}).get("booking_url", "")
+
+        # Send confirmation email with the scheduling link
+        note = f"Business: {data.business_name}" if data.business_name else ""
+        pref = f"Preferred: {data.preferred_date} {data.preferred_time}".strip()
+
+        if SMTP_EMAIL and SMTP_PASSWORD and data.email:
+                        msg = MIMEMultipart()
+                        msg['From'] = SMTP_EMAIL
+                        msg['To'] = data.email
+                        msg['Subject'] = "Your AI Voice Agent Demo - Book Your Time"
+                        body = f"""Hi {data.name},
+
+                        Thanks for your interest in our AI voice agent solutions!
+
+                        Click the link below to book your free 30-minute demo call:
+
+                        {booking_url}
+
+                        {pref}
+                        {note}
+
+                        We look forward to showing you what we can build for your business!
+
+                        - The AI Voice Agency Team
+                        """
+                        msg.attach(MIMEText(body, 'plain'))
+                        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                                            server.starttls()
+                                            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                                            server.send_message(msg)
+                                        print(f"Booking email sent to {data.email}")
+
+        # Also notify Kevin
+        if SMTP_EMAIL and SMTP_PASSWORD:
+                        notify = MIMEMultipart()
+            notify['From'] = SMTP_EMAIL
+            notify['To'] = "chattanoogamarketsolutions@gmail.com"
+            notify['Subject'] = f"New Demo Booking Request - {data.name}"
+            notify_body = f"""New demo booking request from Aria!
+
+            Name: {data.name}
+            Email: {data.email}
+            {note}
+            {pref}
+            Calendly Link: {booking_url}
+            """
+            notify.attach(MIMEText(notify_body, 'plain'))
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                                server.starttls()
+                                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                                server.send_message(notify)
+
+        return {
+                        "status": "success",
+                        "message": f"Booking link sent to {data.email}",
+                        "booking_url": booking_url
+        }
+except Exception as e:
+        print(f"Error booking appointment: {e}")
+        return {"status": "error", "message": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
