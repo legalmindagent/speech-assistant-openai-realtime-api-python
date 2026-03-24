@@ -6,9 +6,7 @@ import audioop
 import struct
 import websockets
 import httpx
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -27,54 +25,44 @@ GEMINI_MODEL = "gemini-2.0-flash-live-001"
 GEMINI_WS_URL = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={GEMINI_API_KEY}"
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL', '')
 
-# Email config
-SMTP_EMAIL = os.getenv('SMTP_EMAIL', '')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+# Email config - Resend
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+FROM_EMAIL = os.getenv('FROM_EMAIL', 'Aria <aria@send.bemycrew.com>')
 MICHELLE_EMAIL = "mwmlwalraven@gmail.com"
 
+# Initialize Resend
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
+
 SYSTEM_MESSAGE = """You are an AI receptionist. When a call comes in, your first question is always:
+
 Hi! Thanks for calling. What industry or type of business are you calling about today?
 
 Based on their answer, adopt the following persona and intake flow:
 
-HVAC: You are Sarah from Comfort Air HVAC. Ask name, address, issue, urgency, system type.
-Emergency: A technician will call within 15 minutes. Routine: Someone will call within 2 hours.
+HVAC: You are Sarah from Comfort Air HVAC. Ask name, address, issue, urgency, system type. Emergency: A technician will call within 15 minutes. Routine: Someone will call within 2 hours.
 
-DENTAL: You are Emily from Bright Smile Dental. Ask name, DOB, insurance, reason, preferred time.
-Emergency: We will fit you in today. Routine: We will call to confirm within 2 hours.
+DENTAL: You are Emily from Bright Smile Dental. Ask name, DOB, insurance, reason, preferred time. Emergency: We will fit you in today. Routine: We will call to confirm within 2 hours.
 
-REAL ESTATE: You are Jessica from Premier Properties. Ask name, buying/selling, budget, areas, timeline.
-Hot lead: An agent will call within 15 minutes. Browsing: An agent will reach out within 24 hours.
+REAL ESTATE: You are Jessica from Premier Properties. Ask name, buying/selling, budget, areas, timeline. Hot lead: An agent will call within 15 minutes. Browsing: An agent will reach out within 24 hours.
 
-PLUMBING: You are Mike from Reliable Plumbing. Ask name, address, issue, urgency, property type.
-Emergency: A plumber will call within 15 minutes. Routine: We will schedule within 2 hours.
+PLUMBING: You are Mike from Reliable Plumbing. Ask name, address, issue, urgency, property type. Emergency: A plumber will call within 15 minutes. Routine: We will schedule within 2 hours.
 
-PEST CONTROL: You are Lisa from Shield Pest Control. Ask name, address, pest type, severity, kids/pets.
-Urgent: A technician will call within 30 minutes. Routine: We will schedule within 24 hours.
+PEST CONTROL: You are Lisa from Shield Pest Control. Ask name, address, pest type, severity, kids/pets. Urgent: A technician will call within 30 minutes. Routine: We will schedule within 24 hours.
 
-ROOFING: You are Tom from Summit Roofing. Ask name, address, issue, urgency, roof age.
-Emergency: A roofer will call within 15 minutes. Routine: Free inspection within 24 hours.
+ROOFING: You are Tom from Summit Roofing. Ask name, address, issue, urgency, roof age. Emergency: A roofer will call within 15 minutes. Routine: Free inspection within 24 hours.
 
-AUTO REPAIR: You are Chris from AutoCare Plus. Ask name, vehicle info, issue, drivable or not.
-Emergency: A mechanic will call within 15 minutes. Routine: Scheduled within 2 hours.
+AUTO REPAIR: You are Chris from AutoCare Plus. Ask name, vehicle info, issue, drivable or not. Emergency: A mechanic will call within 15 minutes. Routine: Scheduled within 2 hours.
 
-VETERINARY: You are Amy from CareFirst Animal Hospital. Ask name, pet info, issue, symptoms.
-Emergency: Bring your pet in immediately. Routine: Appointment within 24 hours.
+VETERINARY: You are Amy from CareFirst Animal Hospital. Ask name, pet info, issue, symptoms. Emergency: Bring your pet in immediately. Routine: Appointment within 24 hours.
 
-ELECTRICAL: You are Dana from PowerPro Electric. Ask name, address, issue, urgency.
-Emergency: An electrician will call within 15 minutes. Routine: Scheduled within 24 hours.
+ELECTRICAL: You are Dana from PowerPro Electric. Ask name, address, issue, urgency. Emergency: An electrician will call within 15 minutes. Routine: Scheduled within 24 hours.
 
-HOME CLEANING: You are Sandra from Spotless Home Cleaning. Ask name, address, home size, clean type.
-All requests: Quote and confirmation call within 2 hours.
+HOME CLEANING: You are Sandra from Spotless Home Cleaning. Ask name, address, home size, clean type. All requests: Quote and confirmation call within 2 hours.
 
-RULES:
-Keep responses SHORT 1-2 sentences.
-Sound natural and warm.
-Never make up times.
-Always confirm info before hanging up.
-End with: You are all set! Someone will be in touch soon.
-If industry not listed: I can help with that! Let me take your information.
+RULES: Keep responses SHORT 1-2 sentences. Sound natural and warm. Never make up times. Always confirm info before hanging up. End with: You are all set! Someone will be in touch soon. If industry not listed: I can help with that! Let me take your information.
 """
+
 
 # Keep-alive self-ping to prevent Render free tier from sleeping
 async def keep_alive():
@@ -88,11 +76,13 @@ async def keep_alive():
         except Exception as e:
             print(f"Keep-alive ping failed: {e}")
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(keep_alive())
     yield
     task.cancel()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -107,25 +97,31 @@ app.add_middleware(
 if not GEMINI_API_KEY:
     raise ValueError('Missing GEMINI_API_KEY')
 
+
 def mulaw_to_pcm16(mulaw_data):
     pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
     return pcm_16k
+
 
 def pcm16_to_mulaw(pcm_data, from_rate=24000):
     pcm_8k, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, 8000, None)
     mulaw_data = audioop.lin2ulaw(pcm_8k, 2)
     return mulaw_data
 
+
 @app.get("/", response_class=JSONResponse)
 async def index_page():
     return {"message": "Multi-Industry AI Voice Agent (Gemini) is running!"}
+
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
     return {"status": "ok"}
 
+
 # --- Send Email Endpoint for ElevenLabs Agent ---
+
 class EmailRequest(BaseModel):
     caller_name: str = ""
     callback_number: str = ""
@@ -134,6 +130,7 @@ class EmailRequest(BaseModel):
     reason_for_therapy: Optional[str] = ""
     referral_source: Optional[str] = ""
     insurance_provider: Optional[str] = ""
+
 
 @app.post("/send-email", response_class=JSONResponse)
 async def send_email(data: EmailRequest):
@@ -152,24 +149,22 @@ Insurance Provider: {data.insurance_provider}
 ---
 Message sent by Aria - Tree of Healing Appointment Scheduler
 """
-        if SMTP_EMAIL and SMTP_PASSWORD:
-            msg = MIMEMultipart()
-            msg['From'] = SMTP_EMAIL
-            msg['To'] = MICHELLE_EMAIL
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'plain'))
 
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                server.starttls()
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.send_message(msg)
-
-            print(f"Email sent to {MICHELLE_EMAIL} for {data.caller_name}")
+        if RESEND_API_KEY:
+            params = {
+                "from": FROM_EMAIL,
+                "to": [MICHELLE_EMAIL],
+                "subject": subject,
+                "text": body,
+            }
+            email_response = resend.Emails.send(params)
+            print(f"Email sent to {MICHELLE_EMAIL} for {data.caller_name} via Resend: {email_response}")
             return {"status": "success", "message": f"Email sent to Michelle for {data.caller_name}"}
         else:
-            print(f"SMTP not configured. Would have sent email for: {data.caller_name}")
+            print(f"Resend not configured. Would have sent email for: {data.caller_name}")
             print(f"Details: {body}")
-            return {"status": "success", "message": "Email logged (SMTP not configured)", "details": body}
+            return {"status": "success", "message": "Email logged (Resend not configured)", "details": body}
+
     except Exception as e:
         print(f"Error sending email: {e}")
         return {"status": "error", "message": str(e)}
@@ -177,17 +172,19 @@ Message sent by Aria - Tree of Healing Appointment Scheduler
 
 GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyt24grvJxsfoCMeHgjSZ88E764Bzh5PE8vc1Ec34AP0v3vUSi3XTP3jJZlNCaekJogVg/exec"
 
+
 @app.post("/log-client", response_class=JSONResponse)
 async def log_client(request: Request):
-        try:
-                    body = await request.json()
-                    async with httpx.AsyncClient(follow_redirects=True) as client:
-                                    resp = await client.post(GOOGLE_SCRIPT_URL, json=body, timeout=30)
-                                    return {"status": "success", "google_response": resp.text}
-        except Exception as e:
-                    print(f"Error logging client: {e}")
-                    return {"status": "error", "message": str(e)}
-            
+    try:
+        body = await request.json()
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.post(GOOGLE_SCRIPT_URL, json=body, timeout=30)
+        return {"status": "success", "google_response": resp.text}
+    except Exception as e:
+        print(f"Error logging client: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
     response = VoiceResponse()
@@ -199,6 +196,7 @@ async def handle_incoming_call(request: Request):
     connect.stream(url=f'wss://{host}/media-stream')
     response.append(connect)
     return HTMLResponse(content=str(response), media_type="application/xml")
+
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
@@ -260,101 +258,104 @@ async def handle_media_stream(websocket: WebSocket):
 
     await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
+
 # --- Calendly Appointment Booking Endpoint for ElevenLabs Agent ---
+
 CALENDLY_API_KEY = os.getenv('CALENDLY_API_KEY', '')
 CALENDLY_EVENT_TYPE_UUID = os.getenv('CALENDLY_EVENT_TYPE_UUID', '')
 
+
 class BookingRequest(BaseModel):
-        name: str = ""
-        email: str = ""
-        business_name: Optional[str] = ""
-        preferred_date: Optional[str] = ""
-        preferred_time: Optional[str] = ""
+    name: str = ""
+    email: str = ""
+    business_name: Optional[str] = ""
+    preferred_date: Optional[str] = ""
+    preferred_time: Optional[str] = ""
+
 
 @app.post("/book-appointment", response_class=JSONResponse)
 async def book_appointment(data: BookingRequest):
-        try:
-                    # Create a Calendly scheduling link for the caller
-                    # This generates a one-off scheduling link they receive via email
-                    headers = {
-                                    "Authorization": f"Bearer {CALENDLY_API_KEY}",
-                                    "Content-Type": "application/json"
-                    }
-                    event_type_uri = f"https://api.calendly.com/event_types/{CALENDLY_EVENT_TYPE_UUID}"
-                    payload = {
-                                    "max_event_count": 1,
-                                    "owner": event_type_uri,
-                                    "owner_type": "EventType"
-                    }
-                    async with httpx.AsyncClient() as client:
-                                    resp = await client.post(
-                                                        "https://api.calendly.com/scheduling_links",
-                                                        json=payload,
-                                                        headers=headers,
-                                                        timeout=15
-                                    )
-                                result = resp.json()
-                    booking_url = result.get("resource", {}).get("booking_url", "")
+    try:
+        headers = {
+            "Authorization": f"Bearer {CALENDLY_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-        # Send confirmation email with the scheduling link
+        event_type_uri = f"https://api.calendly.com/event_types/{CALENDLY_EVENT_TYPE_UUID}"
+
+        payload = {
+            "max_event_count": 1,
+            "owner": event_type_uri,
+            "owner_type": "EventType"
+        }
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.calendly.com/scheduling_links",
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+
+        result = resp.json()
+        booking_url = result.get("resource", {}).get("booking_url", "")
+
         note = f"Business: {data.business_name}" if data.business_name else ""
         pref = f"Preferred: {data.preferred_date} {data.preferred_time}".strip()
 
-        if SMTP_EMAIL and SMTP_PASSWORD and data.email:
-                        msg = MIMEMultipart()
-                        msg['From'] = SMTP_EMAIL
-                        msg['To'] = data.email
-                        msg['Subject'] = "Your AI Voice Agent Demo - Book Your Time"
-                        body = f"""Hi {data.name},
+        # Send confirmation email via Resend
+        if RESEND_API_KEY and data.email:
+            body = f"""Hi {data.name},
 
-                        Thanks for your interest in our AI voice agent solutions!
+Thanks for your interest in our AI voice agent solutions!
 
-                        Click the link below to book your free 30-minute demo call:
+Click the link below to book your free 30-minute demo call:
+{booking_url}
 
-                        {booking_url}
+{pref}
+{note}
 
-                        {pref}
-                        {note}
+We look forward to showing you what we can build for your business!
 
-                        We look forward to showing you what we can build for your business!
+- The AI Voice Agency Team
+"""
+            params = {
+                "from": FROM_EMAIL,
+                "to": [data.email],
+                "subject": "Your AI Voice Agent Demo - Book Your Time",
+                "text": body,
+            }
+            resend.Emails.send(params)
+            print(f"Booking email sent to {data.email} via Resend")
 
-                        - The AI Voice Agency Team
-                        """
-                        msg.attach(MIMEText(body, 'plain'))
-                        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                                            server.starttls()
-                                            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                                            server.send_message(msg)
-                                        print(f"Booking email sent to {data.email}")
-
-        # Also notify Kevin
-        if SMTP_EMAIL and SMTP_PASSWORD:
-                        notify = MIMEMultipart()
-            notify['From'] = SMTP_EMAIL
-            notify['To'] = "chattanoogamarketsolutions@gmail.com"
-            notify['Subject'] = f"New Demo Booking Request - {data.name}"
+        # Also notify Kevin via Resend
+        if RESEND_API_KEY:
             notify_body = f"""New demo booking request from Aria!
 
-            Name: {data.name}
-            Email: {data.email}
-            {note}
-            {pref}
-            Calendly Link: {booking_url}
-            """
-            notify.attach(MIMEText(notify_body, 'plain'))
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                                server.starttls()
-                                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                                server.send_message(notify)
+Name: {data.name}
+Email: {data.email}
+{note}
+{pref}
+Calendly Link: {booking_url}
+"""
+            notify_params = {
+                "from": FROM_EMAIL,
+                "to": ["chattanoogamarketsolutions@gmail.com"],
+                "subject": f"New Demo Booking Request - {data.name}",
+                "text": notify_body,
+            }
+            resend.Emails.send(notify_params)
 
         return {
-                        "status": "success",
-                        "message": f"Booking link sent to {data.email}",
-                        "booking_url": booking_url
+            "status": "success",
+            "message": f"Booking link sent to {data.email}",
+            "booking_url": booking_url
         }
-except Exception as e:
+
+    except Exception as e:
         print(f"Error booking appointment: {e}")
         return {"status": "error", "message": str(e)}
+
 
 if __name__ == "__main__":
     import uvicorn
