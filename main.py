@@ -70,6 +70,7 @@ def get_business_config(called_number):
         "greeting": config.get("greeting", ""),
         "notify_sms": config.get("notify_sms", True),
         "notify_email": config.get("notify_email", True),
+        "voice": config.get("voice", "Kore"),
     }
 
 def build_system_prompt(config):
@@ -164,6 +165,7 @@ async def register_business(request: Request):
         "greeting": data.get("greeting", ""),
         "notify_sms": data.get("notify_sms", True),
         "notify_email": data.get("notify_email", True),
+        "voice": data.get("voice", "Kore"),
     }
     return {"status": "registered", "twilio_number": phone, "config": business_configs[phone]}
 
@@ -226,7 +228,7 @@ async def media_stream(ws: WebSocket):
                             "response_modalities": ["AUDIO"],
                             "speech_config": {
                                 "voice_config": {
-                                    "prebuilt_voice_config": {"voice_name": "Aoede"}
+                                    "prebuilt_voice_config": {"voice_name": config.get("voice", "Kore")}
                                 }
                             },
                         },
