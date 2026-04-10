@@ -4,25 +4,41 @@ import base64
 import asyncio
 import traceback
 from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.websockets import WebSocketDisconnect
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from dotenv import load_dotenv
 import httpx
 
+try:
+    import audioop
+except ImportError:
+    audioop = None
+
 load_dotenv()
 
 app = FastAPI()
+
+# CORS middleware for dashboard
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Environment variables
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+14235563838")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-DASHBOARD_WEBHOOK_URL = os.getenv("DASHBOARD_WEBHOOK_URL", "")
+DASHBOARD_WEBHOOK_URL = os.getenv("DASHBOARD_WEBHOOK_URL", "https://aria-dashboard-steel.vercel.app")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "aria-voice-2024")
 DEFAULT_OWNER_EMAIL = os.getenv("OWNER_EMAIL", "mwmlwalraven@gmail.com")
 DEFAULT_OWNER_PHONE = os.getenv("OWNER_PHONE", "")
@@ -35,29 +51,70 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
 # Active calls tracking
 active_calls = {}
 
+# Call history (persisted)
+CALL_LOG_FILE = Path("/tmp/aria_call_log.json")
+BUSINESS_CONFIG_FILE = Path("/tmp/aria_businesses.json")
+
+call_history = []
+
 # Business configs (keyed by Twilio number)
 business_configs = {}
 
+def save_businesses():
+    try:
+        with open(BUSINESS_CONFIG_FILE, "w") as f:
+            json.dump(business_configs, f, indent=2)
+    except Exception as e:
+        print(f"Error saving businesses: {e}")
+
+def load_businesses():
+    global business_configs
+    try:
+        if BUSINESS_CONFIG_FILE.exists():
+            with open(BUSINESS_CONFIG_FILE, "r") as f:
+                business_configs = json.load(f)
+                print(f"Loaded {len(business_configs)} business configs from disk")
+    except Exception as e:
+        print(f"Error loading businesses: {e}")
+
+def save_call_log():
+    try:
+        with open(CALL_LOG_FILE, "w") as f:
+            json.dump(call_history[-500:], f, indent=2)
+    except Exception as e:
+        print(f"Error saving call log: {e}")
+
+def load_call_log():
+    global call_history
+    try:
+        if CALL_LOG_FILE.exists():
+            with open(CALL_LOG_FILE, "r") as f:
+                call_history = json.load(f)
+                print(f"Loaded {len(call_history)} call records from disk")
+    except Exception as e:
+        print(f"Error loading call log: {e}")
+
+
 # Default industry personas
 INDUSTRY_PERSONAS = {
-    "hvac": {"name": "Sarah", "company": "Comfort Air Pro", "specialty": "heating and cooling"},
-    "dental": {"name": "Emily", "company": "Bright Smile Dental", "specialty": "dental care"},
-    "real_estate": {"name": "Jessica", "company": "Premier Properties", "specialty": "real estate"},
-    "plumbing": {"name": "Mike", "company": "FlowRight Plumbing", "specialty": "plumbing"},
-    "pest_control": {"name": "Lisa", "company": "Shield Pest Solutions", "specialty": "pest control"},
-    "roofing": {"name": "Tom", "company": "TopGuard Roofing", "specialty": "roofing"},
-    "auto_repair": {"name": "Chris", "company": "AutoCare Express", "specialty": "auto repair"},
-    "veterinary": {"name": "Amy", "company": "Happy Paws Vet", "specialty": "veterinary care"},
-    "electrical": {"name": "Dana", "company": "BrightWire Electric", "specialty": "electrical"},
-    "home_cleaning": {"name": "Sandra", "company": "Sparkle Clean Co", "specialty": "home cleaning"},
-    "towing": {"name": "Jake", "company": "RapidTow Services", "specialty": "towing and roadside assistance"},
-    "locksmith": {"name": "Alex", "company": "KeyMaster Locksmith", "specialty": "locksmith and security"},
-    "general": {"name": "Aria", "company": "Your Business", "specialty": "customer service"},
+    "hvac": {"name": "Aria", "company": "Comfort Air Pro", "specialty": "heating and cooling"},
+    "dental": {"name": "Aria", "company": "Bright Smile Dental", "specialty": "dental care"},
+    "real_estate": {"name": "Aria", "company": "Premier Properties", "specialty": "real estate"},
+    "plumbing": {"name": "Aria", "company": "FlowRight Plumbing", "specialty": "plumbing"},
+    "pest_control": {"name": "Aria", "company": "Shield Pest Solutions", "specialty": "pest control"},
+    "roofing": {"name": "Aria", "company": "TopGuard Roofing", "specialty": "roofing"},
+    "auto_repair": {"name": "Aria", "company": "AutoCare Express", "specialty": "auto repair"},
+    "veterinary": {"name": "Aria", "company": "PawCare Veterinary", "specialty": "veterinary care"},
+    "legal": {"name": "Aria", "company": "Summit Legal Group", "specialty": "legal services"},
+    "towing": {"name": "Aria", "company": "RapidTow", "specialty": "towing and roadside assistance"},
+    "locksmith": {"name": "Aria", "company": "QuickKey Locksmith", "specialty": "locksmith services"},
+    "electrical": {"name": "Aria", "company": "BrightWire Electric", "specialty": "electrical services"},
+    "general": {"name": "Aria", "company": "Local Business", "specialty": "customer service"},
 }
 
 
-def get_business_config(called_number):
-    config = business_configs.get(called_number, {})
+def get_business_config(phone_number):
+    config = business_configs.get(phone_number, {})
     industry = config.get("industry", "general")
     persona = INDUSTRY_PERSONAS.get(industry, INDUSTRY_PERSONAS["general"])
     return {
@@ -72,6 +129,7 @@ def get_business_config(called_number):
         "notify_email": config.get("notify_email", True),
         "voice": config.get("voice", "Kore"),
     }
+
 
 def build_system_prompt(config):
     greeting_line = ""
@@ -91,8 +149,8 @@ Your job:
    - Their address or location (if relevant for service dispatch)
    - How urgent it is (emergency, today, this week, just a quote)
 3. Be empathetic and helpful. If it is an emergency, reassure them help is on the way.
-4. Summarize what you have collected and let them know someone will follow up shortly.
-5. Keep the conversation natural. You are a real receptionist, not a robot.
+4. Summarize what you have collected and let them know the team will follow up shortly.
+5. Thank them for calling and wish them a good day.
 
 IMPORTANT RULES:
 - Never say you are an AI unless directly asked.
@@ -109,35 +167,22 @@ GEMINI_WS_URL = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativ
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
-    <html><head><title>Aria Voice AI</title></head>
-    <body style="font-family:sans-serif;max-width:800px;margin:40px auto;padding:20px;">
-    <h1>Aria Voice AI - Live</h1>
-    <p>AI-powered phone receptionist for service businesses.</p>
-    <h3>Status</h3>
-    <ul>
-        <li>Voice Backend: Online</li>
-        <li>Twilio Integration: Active</li>
-        <li>Gemini 2.0 Flash: Connected</li>
-    </ul>
-    <h3>Active Calls</h3>
-    <p id="calls">Loading...</p>
-    <h3>Registered Businesses</h3>
-    <p id="biz">Loading...</p>
-    <script>
-    fetch('/active-calls').then(r=>r.json()).then(d=>{
-        document.getElementById('calls').textContent=d.active_calls+' active calls';
-    });
-    fetch('/businesses').then(r=>r.json()).then(d=>{
-        document.getElementById('biz').textContent=d.count+' businesses registered';
-    });
-    </script>
+    <html><head><title>Aria Voice AI</title>
+    <style>body{font-family:system-ui;max-width:600px;margin:60px auto;text-align:center;color:#333}
+    h1{color:#4F46E5;font-size:2.5em}p{font-size:1.2em;line-height:1.6}
+    .badge{display:inline-block;padding:6px 16px;background:#10B981;color:white;border-radius:20px;font-size:0.9em}
+    a{color:#4F46E5}</style></head>
+    <body><h1>Aria Voice AI</h1>
+    <p class="badge">System Online</p>
+    <p>AI-powered phone receptionist for local businesses.</p>
+    <p><a href="/health">Health Check</a> | <a href="/businesses">Businesses</a> | <a href="/call-log">Call Log</a></p>
     </body></html>
     """
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "active_calls": len(active_calls), "businesses": len(business_configs)}
+    return {"status": "ok", "active_calls": len(active_calls), "businesses": len(business_configs), "total_calls": len(call_history)}
 
 
 @app.get("/active-calls")
@@ -147,7 +192,12 @@ async def get_active_calls():
 
 @app.get("/businesses")
 async def get_businesses():
-    return {"count": len(business_configs), "numbers": list(business_configs.keys())}
+    return {"count": len(business_configs), "numbers": list(business_configs.keys()), "configs": {k: {kk: vv for kk, vv in v.items()} for k, v in business_configs.items()}}
+
+
+@app.get("/call-log")
+async def get_call_log():
+    return {"total": len(call_history), "calls": call_history[-50:][::-1]}
 
 
 @app.post("/register-business")
@@ -163,11 +213,13 @@ async def register_business(request: Request):
         "owner_email": data.get("owner_email", DEFAULT_OWNER_EMAIL),
         "owner_phone": data.get("owner_phone", ""),
         "greeting": data.get("greeting", ""),
+        "voice": data.get("voice", "Kore"),
         "notify_sms": data.get("notify_sms", True),
         "notify_email": data.get("notify_email", True),
-        "voice": data.get("voice", "Kore"),
     }
+    save_businesses()
     return {"status": "registered", "twilio_number": phone, "config": business_configs[phone]}
+
 
 @app.post("/incoming-call")
 async def incoming_call(request: Request):
@@ -248,8 +300,8 @@ async def media_stream(ws: WebSocket):
                     "realtime_input": {
                         "media_chunks": [
                             {
-                                "data": base64.b64encode(audio_data).decode("utf-8"),
                                 "mime_type": "audio/pcm;rate=16000",
+                                "data": base64.b64encode(audio_data).decode("utf-8"),
                             }
                         ]
                     }
@@ -333,6 +385,21 @@ async def media_stream(ws: WebSocket):
         duration = int((call_end - call_start).total_seconds())
         print(f"Call ended | Duration: {duration}s | Caller: {caller} | Business: {config.get('business_name', 'Unknown')}")
 
+        # Save call to history
+        call_record = {
+            "call_sid": call_sid,
+            "caller": caller,
+            "called": called,
+            "business_name": config.get("business_name", "Unknown"),
+            "industry": config.get("industry", "general"),
+            "duration": duration,
+            "started_at": call_start.isoformat(),
+            "ended_at": call_end.isoformat(),
+            "status": "completed" if duration > 5 else "missed",
+        }
+        call_history.append(call_record)
+        save_call_log()
+
         if call_sid in active_calls:
             del active_calls[call_sid]
 
@@ -345,19 +412,113 @@ async def media_stream(ws: WebSocket):
         if config.get("notify_email") and config.get("owner_email"):
             await send_email_notification(config, caller, duration)
 
+
 def mulaw_to_pcm(mulaw_data, from_rate, to_rate):
-    import audioop
-    pcm = audioop.ulaw2lin(mulaw_data, 2)
-    if from_rate != to_rate:
-        pcm, _ = audioop.ratecv(pcm, 2, 1, from_rate, to_rate, None)
-    return pcm
+    if audioop:
+        pcm = audioop.ulaw2lin(mulaw_data, 2)
+        if from_rate != to_rate:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, from_rate, to_rate, None)
+        return pcm
+    else:
+        import struct
+        MULAW_DECODE_TABLE = [
+            -32124,-31100,-30076,-29052,-28028,-27004,-25980,-24956,
+            -23932,-22908,-21884,-20860,-19836,-18812,-17788,-16764,
+            -15996,-15484,-14972,-14460,-13948,-13436,-12924,-12412,
+            -11900,-11388,-10876,-10364,-9852,-9340,-8828,-8316,
+            -7932,-7676,-7420,-7164,-6908,-6652,-6396,-6140,
+            -5884,-5628,-5372,-5116,-4860,-4604,-4348,-4092,
+            -3900,-3772,-3644,-3516,-3388,-3260,-3132,-3004,
+            -2876,-2748,-2620,-2492,-2364,-2236,-2108,-1980,
+            -1884,-1820,-1756,-1692,-1628,-1564,-1500,-1436,
+            -1372,-1308,-1244,-1180,-1116,-1052,-988,-924,
+            -876,-844,-812,-780,-748,-716,-684,-652,
+            -620,-588,-556,-524,-492,-460,-428,-396,
+            -372,-356,-340,-324,-308,-292,-276,-260,
+            -244,-228,-212,-196,-180,-164,-148,-132,
+            -120,-112,-104,-96,-88,-80,-72,-64,
+            -56,-48,-40,-32,-24,-16,-8,0,
+            32124,31100,30076,29052,28028,27004,25980,24956,
+            23932,22908,21884,20860,19836,18812,17788,16764,
+            15996,15484,14972,14460,13948,13436,12924,12412,
+            11900,11388,10876,10364,9852,9340,8828,8316,
+            7932,7676,7420,7164,6908,6652,6396,6140,
+            5884,5628,5372,5116,4860,4604,4348,4092,
+            3900,3772,3644,3516,3388,3260,3132,3004,
+            2876,2748,2620,2492,2364,2236,2108,1980,
+            1884,1820,1756,1692,1628,1564,1500,1436,
+            1372,1308,1244,1180,1116,1052,988,924,
+            876,844,812,780,748,716,684,652,
+            620,588,556,524,492,460,428,396,
+            372,356,340,324,308,292,276,260,
+            244,228,212,196,180,164,148,132,
+            120,112,104,96,88,80,72,64,
+            56,48,40,32,24,16,8,0,
+        ]
+        samples = []
+        for byte in mulaw_data:
+            samples.append(MULAW_DECODE_TABLE[byte])
+        pcm = struct.pack(f"<{len(samples)}h", *samples)
+        if from_rate != to_rate:
+            ratio = to_rate / from_rate
+            new_len = int(len(samples) * ratio)
+            new_samples = []
+            for i in range(new_len):
+                src = i / ratio
+                idx = int(src)
+                if idx >= len(samples) - 1:
+                    new_samples.append(samples[-1])
+                else:
+                    frac = src - idx
+                    new_samples.append(int(samples[idx] * (1 - frac) + samples[idx + 1] * frac))
+            pcm = struct.pack(f"<{len(new_samples)}h", *new_samples)
+        return pcm
 
 
 def pcm_to_mulaw(pcm_data, from_rate, to_rate):
-    import audioop
-    if from_rate != to_rate:
-        pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, to_rate, None)
-    return audioop.lin2ulaw(pcm_data, 2)
+    if audioop:
+        if from_rate != to_rate:
+            pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, from_rate, to_rate, None)
+        return audioop.lin2ulaw(pcm_data, 2)
+    else:
+        import struct
+        if from_rate != to_rate:
+            ratio = to_rate / from_rate
+            num_samples = len(pcm_data) // 2
+            samples = struct.unpack(f"<{num_samples}h", pcm_data)
+            new_len = int(num_samples * ratio)
+            new_samples = []
+            for i in range(new_len):
+                src = i / ratio
+                idx = int(src)
+                if idx >= num_samples - 1:
+                    new_samples.append(samples[-1])
+                else:
+                    frac = src - idx
+                    new_samples.append(int(samples[idx] * (1 - frac) + samples[idx + 1] * frac))
+            pcm_data = struct.pack(f"<{len(new_samples)}h", *new_samples)
+        MULAW_BIAS = 0x84
+        MULAW_MAX = 0x7FFF
+        MULAW_CLIP = 32635
+        num_samples = len(pcm_data) // 2
+        samples = struct.unpack(f"<{num_samples}h", pcm_data)
+        result = bytearray(num_samples)
+        for i, sample in enumerate(samples):
+            sign = 0
+            if sample < 0:
+                sign = 0x80
+                sample = -sample
+            if sample > MULAW_CLIP:
+                sample = MULAW_CLIP
+            sample = sample + MULAW_BIAS
+            exponent = 7
+            mask = 0x4000
+            while exponent > 0 and not (sample & mask):
+                exponent -= 1
+                mask >>= 1
+            mantissa = (sample >> (exponent + 3)) & 0x0F
+            result[i] = ~(sign | (exponent << 4) | mantissa) & 0xFF
+        return bytes(result)
 
 
 async def send_call_webhook(call_sid, caller, called, config, duration):
@@ -403,7 +564,7 @@ async def send_email_notification(config, caller, duration):
                         "from": "Aria Voice AI <aria@resend.dev>",
                         "to": [config["owner_email"]],
                         "subject": f"New Call for {config['business_name']} from {caller}",
-                        "html": f"<h2>New Call Received</h2><p><strong>Business:</strong> {config['business_name']}</p><p><strong>Caller:</strong> {caller}</p><p><strong>Duration:</strong> {duration} seconds</p><p><strong>Time:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p><p>Check your dashboard for full details.</p>",
+                        "html": f"<h2>New Call Received</h2><p><strong>Business:</strong> {config['business_name']}</p><p><strong>Caller:</strong> {caller}</p><p><strong>Duration:</strong> {duration}s</p><p><strong>Time:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p><p><a href=\"{DASHBOARD_WEBHOOK_URL}\">View Dashboard</a></p>",
                     },
                 )
                 print(f"Email sent to {config['owner_email']}: {resp.status_code}")
@@ -458,8 +619,29 @@ async def keep_alive():
 
 @app.on_event("startup")
 async def startup():
+    # Load persisted data
+    load_businesses()
+    load_call_log()
+
+    # Auto-register demo business if none exist
+    if not business_configs:
+        business_configs["+14235563838"] = {
+            "business_name": "RapidTow Atlanta",
+            "agent_name": "Aria",
+            "industry": "towing",
+            "owner_email": DEFAULT_OWNER_EMAIL,
+            "owner_phone": "",
+            "greeting": "",
+            "voice": "Kore",
+            "notify_sms": True,
+            "notify_email": True,
+        }
+        save_businesses()
+        print("Auto-registered demo business: RapidTow Atlanta")
+
     asyncio.create_task(keep_alive())
     print("Aria Voice AI started!")
+    print(f"Businesses loaded: {len(business_configs)}")
     print(f"Twilio configured: {bool(twilio_client)}")
     print(f"Gemini API Key: {'yes' if GOOGLE_API_KEY else 'no'}")
     print(f"Resend API Key: {'yes' if RESEND_API_KEY else 'no'}")
