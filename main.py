@@ -362,7 +362,7 @@ async def media_stream(ws: WebSocket):
                 await gws.send(json.dumps(setup_msg))
                 raw = await gws.recv()
                 setup_response = json.loads(raw)
-                print("Gemini setup complete")
+                print(f"Gemini setup complete, response keys: {list(setup_response.keys())}")
                 return setup_response
 
             async def send_to_gemini(audio_data):
@@ -383,16 +383,23 @@ async def media_stream(ws: WebSocket):
                 try:
                     async for raw in gws:
                         resp = json.loads(raw)
+                        resp_keys = list(resp.keys())
+                        print(f"Gemini response keys: {resp_keys}")
                         try:
-                            parts = (
-                                resp.get("serverContent", {})
-                                .get("modelTurn", {})
-                                .get("parts", [])
-                            )
+                            sc = resp.get("serverContent", {})
+                            mt = sc.get("modelTurn", {})
+                            parts = mt.get("parts", [])
+                            if not parts and sc:
+                                print(f"serverContent keys: {list(sc.keys())}")
+                                if mt:
+                                    print(f"modelTurn keys: {list(mt.keys())}")
                             for part in parts:
+                                part_keys = list(part.keys())
                                 if "inlineData" in part:
                                     audio_b64 = part["inlineData"]["data"]
                                     audio_bytes = base64.b64decode(audio_b64)
+                                    mime = part["inlineData"].get("mimeType", "unknown")
+                                    print(f"Got audio: {len(audio_bytes)} bytes, mime={mime}, stream_sid={stream_sid}")
                                     mulaw = pcm_to_mulaw(audio_bytes, 24000, 8000)
                                     outb64 = base64.b64encode(mulaw).decode("utf-8")
                                     media_msg = {
@@ -401,8 +408,12 @@ async def media_stream(ws: WebSocket):
                                         "media": {"payload": outb64},
                                     }
                                     await ws.send_json(media_msg)
+                                else:
+                                    print(f"Non-audio part keys: {part_keys}")
                         except Exception as e:
                             print(f"Error processing Gemini response: {e}")
+                            import traceback
+                            traceback.print_exc()
                 except websockets.exceptions.ConnectionClosedOK:
                     print("Gemini connection closed normally")
                 except Exception as e:
@@ -434,6 +445,7 @@ async def media_stream(ws: WebSocket):
                             await setup_gemini()
                             initial_setup_done = True
                             setup_done_event.set()
+                            print(f"Setup done, stream_sid={stream_sid}, sending initial prompt to Gemini")
 
                         elif event == "media" and initial_setup_done:
                             payload = data["media"]["payload"]
