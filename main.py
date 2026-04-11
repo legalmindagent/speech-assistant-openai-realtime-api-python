@@ -379,6 +379,7 @@ async def media_stream(ws: WebSocket):
                 await gws.send(json.dumps(msg))
 
             async def receive_from_gemini():
+                await setup_done_event.wait()
                 try:
                     async for raw in gws:
                         resp = json.loads(raw)
@@ -408,6 +409,7 @@ async def media_stream(ws: WebSocket):
                     print(f"Gemini receive error: {e}")
 
             initial_setup_done = False
+            setup_done_event = asyncio.Event()
 
             async def handle_twilio():
                 nonlocal stream_sid, call_sid, caller, called, config, initial_setup_done
@@ -431,6 +433,7 @@ async def media_stream(ws: WebSocket):
 
                             await setup_gemini()
                             initial_setup_done = True
+                        setup_done_event.set()
 
                         elif event == "media" and initial_setup_done:
                             payload = data["media"]["payload"]
