@@ -3,6 +3,7 @@ uvicorn
 websockets
 twilio
 python-dotenv
+python-multipart
 audioop-lts
 httpx
 resend
