@@ -345,7 +345,7 @@ async def media_stream(ws: WebSocket):
                 nonlocal config
                 setup_msg = {
                     "setup": {
-                        "model": "models/gemini-2.0-flash-live-001",
+                        "model": "models/gemini-2.0-flash-exp",
                         "generation_config": {
                             "response_modalities": ["AUDIO"],
                             "speech_config": {
