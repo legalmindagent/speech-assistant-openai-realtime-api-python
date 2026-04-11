@@ -433,7 +433,7 @@ async def media_stream(ws: WebSocket):
 
                             await setup_gemini()
                             initial_setup_done = True
-                        setup_done_event.set()
+                            setup_done_event.set()
 
                         elif event == "media" and initial_setup_done:
                             payload = data["media"]["payload"]
