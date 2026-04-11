@@ -447,6 +447,18 @@ async def media_stream(ws: WebSocket):
                             setup_done_event.set()
                             print(f"Setup done, stream_sid={stream_sid}, sending initial prompt to Gemini")
 
+                            # Send initial text prompt to trigger Gemini greeting
+                            initial_msg = {
+                                "client_content": {
+                                    "turns": [
+                                        {"role": "user", "parts": [{"text": "Hello, a caller just connected. Please greet them warmly."}]}
+                                    ],
+                                    "turn_complete": True
+                                }
+                            }
+                            await gws.send(json.dumps(initial_msg))
+                            print("Sent initial greeting prompt to Gemini")
+
                         elif event == "media" and initial_setup_done:
                             payload = data["media"]["payload"]
                             audio_bytes = base64.b64decode(payload)
