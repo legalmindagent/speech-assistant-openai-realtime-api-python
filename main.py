@@ -225,9 +225,9 @@ async def register_business(request: Request):
 async def incoming_call(request: Request):
     try:
         form = await request.form()
-        caller = form.get("From", "Unknown")
-        called = form.get("To", "")
-        call_sid = form.get("CallSid", "")
+        caller = str(form.get("From", "Unknown"))
+        called = str(form.get("To", ""))
+        call_sid = str(form.get("CallSid", ""))
 
         config = get_business_config(called)
         print(f"Incoming call from {caller} to {called} ({config['business_name']}) | SID: {call_sid}")
@@ -242,50 +242,67 @@ async def incoming_call(request: Request):
             "status": "ringing",
         }
 
-        host = request.headers.get("host", "localhost")
-        from xml.sax.saxutils import escape
+        host = str(request.headers.get("host", "localhost"))
+        # Build TwiML with simple string concatenation - no dependencies
+        ws_url = "wss://" + host + "/media-stream"
         twiml = '<?xml version="1.0" encoding="UTF-8"?>'
         twiml += '<Response><Connect>'
-        twiml += '<Stream url="wss://' + escape(host) + '/media-stream">'
-        twiml += '<Parameter name="caller" value="' + escape(caller) + '" />'
-        twiml += '<Parameter name="called" value="' + escape(called) + '" />'
-        twiml += '<Parameter name="callSid" value="' + escape(call_sid) + '" />'
+        twiml += '<Stream url="' + ws_url + '">'
+        twiml += '<Parameter name="caller" value="' + caller.replace('"', '') + '" />'
+        twiml += '<Parameter name="called" value="' + called.replace('"', '') + '" />'
+        twiml += '<Parameter name="callSid" value="' + call_sid.replace('"', '') + '" />'
         twiml += '</Stream></Connect></Response>'
-        print(f"TwiML response generated for call {call_sid}")
+        print(f"TwiML generated for {call_sid}: {twiml[:200]}")
         return HTMLResponse(content=twiml, media_type="application/xml")
     except Exception as e:
-        print(f"ERROR in incoming_call: {e}")
+        error_msg = f"ERROR in incoming_call: {str(e)}"
+        print(error_msg)
         traceback.print_exc()
-        fallback = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>We are experiencing technical difficulties. Please try again later.</Say></Response>'
+        error_log.append({"time": datetime.utcnow().isoformat(), "error": str(e), "tb": traceback.format_exc()})
+        fallback = '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">We are experiencing technical difficulties. Please try again in a moment.</Say></Response>'
         return HTMLResponse(content=fallback, media_type="application/xml")
 
 
 # Error log for debugging (in-memory, last 50 errors)
 error_log = []
 
+
 @app.get("/test-twiml")
 async def test_twiml():
     """Test endpoint to verify TwiML generation works"""
     try:
-        from xml.sax.saxutils import escape
         host = "voice-agent-backend-y0t9.onrender.com"
-        caller = "+15551234567"
-        called = "+14235563838"
-        call_sid = "TEST_CALL"
+        ws_url = "wss://" + host + "/media-stream"
         twiml = '<?xml version="1.0" encoding="UTF-8"?>'
         twiml += '<Response><Connect>'
-        twiml += '<Stream url="wss://' + escape(host) + '/media-stream">'
-        twiml += '<Parameter name="caller" value="' + escape(caller) + '" />'
-        twiml += '<Parameter name="called" value="' + escape(called) + '" />'
-        twiml += '<Parameter name="callSid" value="' + escape(call_sid) + '" />'
+        twiml += '<Stream url="' + ws_url + '">'
+        twiml += '<Parameter name="caller" value="+15551234567" />'
+        twiml += '<Parameter name="called" value="+14235563838" />'
+        twiml += '<Parameter name="callSid" value="TEST_CALL" />'
         twiml += '</Stream></Connect></Response>'
         return HTMLResponse(content=twiml, media_type="application/xml")
     except Exception as e:
         return JSONResponse({"error": str(e), "traceback": traceback.format_exc()})
 
+
 @app.get("/errors")
 async def get_errors():
-    return {"errors": error_log[-50:]}
+    return {"errors": error_log[-50:], "total": len(error_log)}
+
+
+@app.post("/test-incoming")
+async def test_incoming():
+    """Test that mimics exactly what Twilio sends"""
+    host = "voice-agent-backend-y0t9.onrender.com"
+    ws_url = "wss://" + host + "/media-stream"
+    twiml = '<?xml version="1.0" encoding="UTF-8"?>'
+    twiml += '<Response><Connect>'
+    twiml += '<Stream url="' + ws_url + '">'
+    twiml += '<Parameter name="caller" value="+17065254344" />'
+    twiml += '<Parameter name="called" value="+14235563838" />'
+    twiml += '<Parameter name="callSid" value="CA_TEST" />'
+    twiml += '</Stream></Connect></Response>'
+    return HTMLResponse(content=twiml, media_type="application/xml")
 
 
 @app.websocket("/media-stream")
