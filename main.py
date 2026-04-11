@@ -265,6 +265,7 @@ async def incoming_call(request: Request):
 
 # Error log for debugging (in-memory, last 50 errors)
 error_log = []
+ws_error_log = []
 
 
 @app.get("/test-twiml")
@@ -288,6 +289,22 @@ async def test_twiml():
 @app.get("/errors")
 async def get_errors():
     return {"errors": error_log[-50:], "total": len(error_log)}
+
+
+@app.get("/debug")
+async def debug_info():
+    return {
+        "google_api_key_set": bool(GOOGLE_API_KEY),
+        "google_api_key_len": len(GOOGLE_API_KEY) if GOOGLE_API_KEY else 0,
+        "google_api_key_prefix": GOOGLE_API_KEY[:8] + "..." if GOOGLE_API_KEY and len(GOOGLE_API_KEY) > 8 else "NOT SET",
+        "gemini_ws_url_prefix": GEMINI_WS_URL[:80] + "..." if GEMINI_WS_URL else "NOT SET",
+        "twilio_configured": bool(twilio_client),
+        "resend_key_set": bool(RESEND_API_KEY),
+        "businesses": len(business_configs),
+        "active_calls": len(active_calls),
+        "total_calls_logged": len(call_history),
+        "ws_errors": ws_error_log[-20:],
+    }
 
 
 @app.post("/test-incoming")
@@ -431,8 +448,10 @@ async def media_stream(ws: WebSocket):
             await asyncio.gather(handle_twilio(), receive_from_gemini())
 
     except Exception as e:
-        print(f"Error in media stream: {e}")
+        err_str = f"Error in media stream: {str(e)}"
+        print(err_str)
         traceback.print_exc()
+        ws_error_log.append({"time": datetime.utcnow().isoformat(), "error": str(e), "tb": traceback.format_exc(), "call_sid": call_sid, "caller": caller})
     finally:
         call_end = datetime.utcnow()
         duration = int((call_end - call_start).total_seconds())
